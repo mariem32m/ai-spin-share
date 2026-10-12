@@ -4,6 +4,7 @@ import {
   DEMO_STORE_KEY,
   MIN_SUBMIT_INTERVAL_MS,
   callHostAction,
+  callPublicAction,
 } from "./supabase";
 import type { GameSession, NewSurveyInput, SurveySubmission } from "./types";
 import { SURVEY_QUESTIONS, FINAL_QUESTION } from "./questions";
@@ -198,41 +199,45 @@ function supabaseStore(): Store {
       return { mode: "supabase", session: data as GameSession };
     }
 
-    // No active session — create a default one.
-    const { data: created, error: insertError } = await db
-      .from("game_sessions")
-      .insert({
-        name: "AI Through Your Eyes",
-        status: "active",
-        allow_repeat_participation: true,
-      })
-      .select("*")
-      .single();
-
-    if (insertError) throw new Error(insertError.message);
-    return { mode: "supabase", session: created as GameSession };
+    // No active session — create a default one through the Edge Function
+    // (service role). Public clients have no INSERT policy on game_sessions,
+    // so session creation must be server-side and is idempotent.
+    const res = await callPublicAction("ensure_session");
+    return { mode: "supabase", session: res.session as GameSession };
   }
 
   async function submitSurvey(input: NewSurveyInput): Promise<SurveySubmission> {
     if (!checkSubmitRateLimit()) {
       throw new Error("RATE_LIMITED");
     }
-    const { data, error } = await db
-      .from("survey_submissions")
-      .insert({
-        session_id: input.session_id,
-        nickname: input.nickname.trim() || null,
-        question_1_answer: input.answers.question_1_answer,
-        question_2_answer: input.answers.question_2_answer,
-        question_3_answer: input.answers.question_3_answer,
-        question_4_answer: input.answers.question_4_answer,
-        question_5_answer: input.answers.question_5_answer,
-        ai_track_expectations: input.ai_track_expectations.trim(),
-      })
-      .select("*")
-      .single();
+    const nickname = input.nickname.trim() || null;
+    const payload = {
+      session_id: input.session_id,
+      nickname,
+      question_1_answer: input.answers.question_1_answer,
+      question_2_answer: input.answers.question_2_answer,
+      question_3_answer: input.answers.question_3_answer,
+      question_4_answer: input.answers.question_4_answer,
+      question_5_answer: input.answers.question_5_answer,
+      ai_track_expectations: input.ai_track_expectations.trim(),
+    };
+
+    // Insert WITHOUT `.select()` (return=minimal). Survey responses have no
+    // public SELECT policy, so asking PostgREST to return the inserted row
+    // would be rejected by RLS. The organizer reads rows through the
+    // protected Edge Function instead, so we only need the client-side
+    // record for the immediate UI.
+    const { error } = await db.from("survey_submissions").insert(payload);
     if (error) throw new Error(error.message);
-    return data as SurveySubmission;
+
+    return {
+      id: typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : String(Date.now()),
+      session_id: input.session_id,
+      nickname,
+      ...input.answers,
+      ai_track_expectations: payload.ai_track_expectations,
+      created_at: new Date().toISOString(),
+    } as SurveySubmission;
   }
 
   async function listSurveys(sessionId: string): Promise<SurveySubmission[]> {

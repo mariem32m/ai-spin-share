@@ -114,6 +114,10 @@ npx supabase secrets set HOST_EMAILS=organizer@example.com
 node scripts/sha256.mjs "choose-a-strong-host-password"
 npx supabase secrets set HOST_HASH=<the printed hex>
 
+# Optional CORS allow-list (recommended). When unset the function reflects the
+# request Origin, which is safe because no cookies are used:
+npx supabase secrets set ALLOWED_ORIGINS=https://<your-deployed-domain>
+
 npx supabase functions deploy host-actions
 ```
 
@@ -131,11 +135,15 @@ VITE_HOST_HASH=<same hex as HOST_HASH>              # optional (legacy host auth
 VITE_MIN_SUBMIT_INTERVAL_MS=10000
 ```
 
-`VITE_PUBLIC_BASE_URL` is optional in production — without it, the host dashboard
-builds the QR/student link from `window.location.origin`, which is correct on the
-deployed domain. During **local** `npm run dev` / `vite preview` it must be set to
-a reachable address (or the QR will point at localhost and warn you). The repo's
-`vercel.json` pins it to `https://ai-spin-share.vercel.app` for Vercel builds.
+`VITE_PUBLIC_BASE_URL` is optional in production. The repo ships committed,
+**public** build defaults in `src/lib/publicConfig.ts` (Supabase URL, anon key,
+deployed base URL). These are applied to `vite build` (production) only, so a
+deployed build is live without any `.env` file; local `npm run dev` and the unit
+tests stay in **demo mode** unless you create a local `.env` that opts in. A real
+platform env var (e.g. Vercel `VITE_SUPABASE_URL`) always overrides the default.
+`VITE_PUBLIC_BASE_URL` falls back to `window.location.origin`, which is correct on
+the deployed domain. During **local** `vite preview` of a production build the
+committed base URL is used.
 
 > Never put `SUPABASE_SERVICE_ROLE_KEY` or any admin secret in the frontend. Only
 > the anon key lives in `.env`; the service-role key exists solely inside the Edge
@@ -197,6 +205,7 @@ final open question) live in **`src/lib/questions.ts`**, one editable object wit
 | `VITE_HOST_HASH`              | ✅        | ✅ `HOST_HASH` | Legacy live| SHA-256 of the host password (public in bundle) |
 | `VITE_MIN_SUBMIT_INTERVAL_MS` | ✅        | ❌             | no        | Device-level anti-spam interval                |
 | `HOST_EMAILS`                 | ❌        | ✅             | Rec. mode| Comma-separated organizer emails (Auth JWT auth)|
+| `ALLOWED_ORIGINS`             | ❌        | ✅             | optional | Comma-separated CORS origins (reflects Origin when unset) |
 | `SUPABASE_SERVICE_ROLE_KEY`   | ❌        | ✅ (auto)      | edge fn   | Secret — never in frontend                     |
 
 ## Testing performed
@@ -208,19 +217,23 @@ final open question) live in **`src/lib/questions.ts`**, one editable object wit
   answers, empty/too-long expectations, long nickname), submit + event
   notification, rate limiting, sorting, reset, delete
 - ✅ Edge Function auth logic reviewed: bearer-hash (legacy) and Supabase Auth
-  JWT + `HOST_EMAILS` allow-list; JWT path requires live Supabase to exercise
-- ✅ End-to-end tested (`npm run test:e2e`, Playwright over `vite preview`):
-  welcome → all 5 questions → final open question → submit → thank-you → host
-  dashboard shows the submission — with zero console/page errors
+  JWT + `HOST_EMAILS` allow-list; unauthenticated privileged calls return 401
+- ✅ End-to-end tested against **demo mode** (`npm run test:e2e`, Playwright over
+  `vite preview`): welcome → all 5 questions → final open question → submit →
+  thank-you → host dashboard shows the submission — with zero console/page errors
+- ✅ End-to-end tested against the **live Supabase project** (same command plus
+  `E2E_HOST_EMAIL` / `E2E_HOST_PASSWORD`): the student insert lands in Postgres,
+  anon cannot read it back (RLS), the organizer signs in and the dashboard
+  displays the response through the protected Edge Function
 - ✅ EN + AR, keyboard navigation, and reduced-motion behavior verified
 
-### Configuration still required for production
+### Deployment status
 
-- A Supabase project (create at supabase.com) + `supabase db push` (or run
-  `schema.sql` in the SQL editor) + deploy `host-actions`
-- Set the `HOST_EMAILS` secret (recommended) and optionally `HOST_HASH`
-- Frontend env vars (`VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, optionally
-  `VITE_HOST_HASH`) + static deployment with SPA fallback
+This project is deployed to Vercel (`https://ai-spin-share.vercel.app`) and wired
+to a live Supabase project. Remaining / optional manual steps:
+
+- Rotate the organizer account password (created during setup) after first login
+- Optionally set `ALLOWED_ORIGINS` to lock CORS to the deployed domain
 - (Recommended) add server-side rate limiting / captcha in the Edge Function or
   increase limits if many students submit at once
 

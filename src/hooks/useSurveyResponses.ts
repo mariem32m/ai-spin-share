@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { store, resolveSession } from "../lib/store";
 import type { StoreMode, RealtimePayload } from "../lib/store";
 import type { GameSession, SurveySubmission } from "../lib/types";
@@ -26,28 +26,29 @@ export function useSurveyResponses(pollMs = 5000): SurveyState {
   const [responses, setResponses] = useState<SurveySubmission[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const sessionIdRef = useRef<string | null>(null);
+  // Session id kept in state (not a ref) so the live-update effect below
+  // re-runs once the async session resolution completes.
+  const [sessionId, setSessionId] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
-    if (!sessionIdRef.current) return;
+  const load = useCallback(async (sid: string) => {
     try {
+      const list = await store.listSurveys(sid);
       setError(null);
-      const list = await store.listSurveys(sessionIdRef.current);
       setResponses(list);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
   }, []);
 
-  // Resolve the session once, then run an initial load.
+  // Resolve the session once, then perform the initial load.
   useEffect(() => {
     let cancelled = false;
     resolveSession()
       .then((info) => {
         if (cancelled) return;
-        sessionIdRef.current = info.session.id;
         setSession(info.session);
-        return load();
+        setSessionId(info.session.id);
+        void load(info.session.id);
       })
       .catch((e) => {
         if (!cancelled) setError(e instanceof Error ? e.message : String(e));
@@ -60,15 +61,16 @@ export function useSurveyResponses(pollMs = 5000): SurveyState {
     };
   }, [load]);
 
-  // Live updates: demo event bus + periodic polling (also covers Supabase).
+  // Live updates: demo event bus + periodic polling (which also covers
+  // Supabase). Runs once the session id is known.
   useEffect(() => {
-    if (!sessionIdRef.current) return;
+    if (!sessionId) return;
     let disposed = false;
 
     const handlePayload = (p: RealtimePayload) => {
       if (disposed) return;
       const rec = p.submission;
-      if (!rec || rec.session_id !== sessionIdRef.current) return;
+      if (!rec || rec.session_id !== sessionId) return;
       setResponses((prev) => {
         if (p.eventType === "DELETE") return prev.filter((s) => s.id !== rec.id);
         const exists = prev.some((s) => s.id === rec.id);
@@ -81,14 +83,12 @@ export function useSurveyResponses(pollMs = 5000): SurveyState {
       if (!disposed) setResponses(list);
     };
 
-    const unsubscribe = store.subscribe(sessionIdRef.current, handlePayload, handleList);
-
+    const unsubscribe = store.subscribe(sessionId, handlePayload, handleList);
     const timer = window.setInterval(() => {
-      void load();
+      void load(sessionId);
     }, pollMs);
-
     const onVisibility = () => {
-      if (document.visibilityState === "visible") void load();
+      if (document.visibilityState === "visible") void load(sessionId);
     };
     document.addEventListener("visibilitychange", onVisibility);
 
@@ -98,11 +98,11 @@ export function useSurveyResponses(pollMs = 5000): SurveyState {
       window.clearInterval(timer);
       document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [load, pollMs]);
+  }, [sessionId, load, pollMs]);
 
   const refresh = useCallback(async () => {
-    await load();
-  }, [load]);
+    if (sessionId) await load(sessionId);
+  }, [sessionId, load]);
 
   return {
     responses,

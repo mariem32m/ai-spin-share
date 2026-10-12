@@ -7,11 +7,11 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
-# Environment files (never commit real secrets)
+# Environment files (never commit real secrets).
+# Public build values live in src/lib/publicConfig.ts instead of any .env file.
 .env
 .env.*
 !.env.example
-!.env.production
 
 # Scratch copy of the project (not part of the app)
 new-project/

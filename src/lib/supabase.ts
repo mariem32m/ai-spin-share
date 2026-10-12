@@ -1,8 +1,21 @@
 import { createClient } from "@supabase/supabase-js";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import {
+  PUBLIC_SUPABASE_URL,
+  PUBLIC_SUPABASE_ANON_KEY,
+  PUBLIC_BASE_URL,
+  PUBLIC_MIN_SUBMIT_INTERVAL_MS,
+} from "./publicConfig";
 
-const url = import.meta.env.VITE_SUPABASE_URL as string | undefined;
-const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined;
+// Platform env vars override the committed public defaults (see publicConfig).
+// The committed defaults apply to PRODUCTION builds only, so local dev and
+// unit tests stay in demo mode unless a local .env explicitly opts into live.
+const prodDefaults = import.meta.env.PROD;
+const url =
+  (import.meta.env.VITE_SUPABASE_URL as string | undefined) || (prodDefaults ? PUBLIC_SUPABASE_URL : "");
+const anonKey =
+  (import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined) ||
+  (prodDefaults ? PUBLIC_SUPABASE_ANON_KEY : "");
 
 /** True when both Supabase credentials are configured. */
 export const isSupabaseConfigured = Boolean(url && anonKey);
@@ -22,12 +35,14 @@ export const HOST_HASH = (import.meta.env.VITE_HOST_HASH as string | undefined) 
 
 /** Min ms between submissions from one device. */
 export const MIN_SUBMIT_INTERVAL_MS = Number(
-  (import.meta.env.VITE_MIN_SUBMIT_INTERVAL_MS as string | undefined) ?? "10000",
+  (import.meta.env.VITE_MIN_SUBMIT_INTERVAL_MS as string | undefined) || PUBLIC_MIN_SUBMIT_INTERVAL_MS,
 );
 
-/** Public base URL for share links / QR (falls back to current origin). */
+/** Public base URL for share links / QR (env → prod default → origin). */
 export function publicBaseUrl(): string {
-  const configured = import.meta.env.VITE_PUBLIC_BASE_URL as string | undefined;
+  const configured =
+    (import.meta.env.VITE_PUBLIC_BASE_URL as string | undefined) ||
+    (import.meta.env.PROD ? PUBLIC_BASE_URL : "");
   if (configured) return configured.replace(/\/$/, "");
   if (typeof window !== "undefined") return window.location.origin;
   return "";
@@ -52,9 +67,26 @@ let hostHostUserEmail: string | null = null;
 /** Current Supabase Auth access token after organizer sign-in, or null. */
 let hostSessionToken: string | null = null;
 
-/** True after a successful organizer account sign-in. */
-export function isOrganizerSignedIn(): boolean {
-  return Boolean(hostSessionToken);
+/**
+ * Resolve the organizer bearer token, refreshing from the persisted Supabase
+ * Auth session when the in-memory cache is empty (e.g. after a page reload).
+ * Returns null when the organizer is not signed in.
+ */
+async function currentHostToken(): Promise<string | null> {
+  if (hostSessionToken) return hostSessionToken;
+  if (!supabase) return null;
+  try {
+    const { data } = await supabase.auth.getSession();
+    const session = data.session;
+    if (session?.access_token) {
+      hostSessionToken = session.access_token;
+      hostHostUserEmail = session.user?.email ?? hostHostUserEmail;
+      return hostSessionToken;
+    }
+  } catch {
+    /* ignore */
+  }
+  return null;
 }
 
 /** Email of the signed-in organizer (for showing in the dashboard). */
@@ -87,10 +119,11 @@ export async function signOutOrganizer(): Promise<void> {
 
 /**
  * Bearer token for privileged host actions: the Supabase Auth JWT when an
- * organizer is signed in, otherwise the configured host hash (fallback).
+ * organizer is signed in (cache or persisted session), otherwise the
+ * configured host hash (legacy fallback).
  */
-export function hostBearerToken(): string {
-  return hostSessionToken ?? HOST_HASH;
+export async function hostBearerToken(): Promise<string> {
+  return (await currentHostToken()) ?? HOST_HASH;
 }
 
 /** Full student join URL. */
@@ -117,9 +150,10 @@ export async function callHostAction(
   if (!isSupabaseConfigured || !url) {
     throw new Error("Host actions require the Supabase Edge Function. See README.");
   }
-  // A signed-in organizer (Supabase Auth) or the configured host hash.
-  const bearer = hostBearerToken();
-  if (!isOrganizerSignedIn() && !HOST_HASH) {
+  // A signed-in organizer (Supabase Auth JWT, cached or persisted) or the
+  // configured legacy host hash.
+  const bearer = await hostBearerToken();
+  if (!bearer) {
     throw new Error("Sign in as an organizer or configure VITE_HOST_HASH to enable host actions.");
   }
   const fnUrl = `${url}/functions/v1/host-actions`;
@@ -140,6 +174,37 @@ export async function callHostAction(
       /* keep statusText */
     }
     throw new Error(`Host action failed (${res.status}): ${detail}. Deploy supabase/functions/host-actions.`);
+  }
+  return (await res.json()) as { ok: true } & Record<string, unknown>;
+}
+
+/**
+ * Call a PUBLIC (unauthenticated) Edge Function action. The only such action
+ * is `ensure_session`: it resolves or lazily creates the single active survey
+ * session so students can submit even before the organizer opens the
+ * dashboard. It exposes no response data.
+ */
+export async function callPublicAction(
+  action: "ensure_session",
+  args: Record<string, unknown> = {},
+): Promise<{ ok: true } & Record<string, unknown>> {
+  if (!isSupabaseConfigured || !url) {
+    throw new Error("Supabase is not configured.");
+  }
+  const res = await fetch(`${url}/functions/v1/host-actions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action, ...args }),
+  });
+  if (!res.ok) {
+    let detail = res.statusText;
+    try {
+      const body = (await res.json()) as { message?: string };
+      if (body.message) detail = body.message;
+    } catch {
+      /* keep statusText */
+    }
+    throw new Error(`Action failed (${res.status}): ${detail}`);
   }
   return (await res.json()) as { ok: true } & Record<string, unknown>;
 }

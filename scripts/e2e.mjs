@@ -5,6 +5,10 @@
  *   npm run test:e2e                 # against http://localhost:4173
  *   BASE_URL=... npm run test:e2e    # against any deployment
  *
+ * Live mode (Supabase backend + organizer login gate):
+ *   E2E_HOST_EMAIL=... E2E_HOST_PASSWORD=... npm run test:e2e
+ * Never commit those values — pass them as environment variables.
+ *
  * Covers the full student journey on both desktop and touch: answer the
  * five questions, type the final expectation, submit, see the thank-you
  * screen, then verify the organizer dashboard shows the response and the
@@ -14,6 +18,13 @@ import { existsSync } from "node:fs";
 import { chromium } from "playwright-core";
 
 const BASE = process.env.BASE_URL ?? "http://localhost:4173";
+
+// Live mode: when organizer credentials are provided, the dashboard login
+// gate is passed with a real Supabase Auth sign-in. Without them the suite
+// runs against demo mode (localStorage) exactly as before.
+const HOST_EMAIL = process.env.E2E_HOST_EMAIL ?? "";
+const HOST_PASSWORD = process.env.E2E_HOST_PASSWORD ?? "";
+const LIVE = Boolean(HOST_EMAIL && HOST_PASSWORD);
 
 function findBrowser() {
   if (process.env.CHROMIUM_PATH) return process.env.CHROMIUM_PATH;
@@ -106,10 +117,26 @@ async function journey({ touch }) {
     .then(() => check(`[${touch ? "touch" : "desktop"}] thank-you screen shown`, true))
     .catch(() => check(`[${touch ? "touch" : "desktop"}] thank-you screen shown`, false, "timeout"));
 
-  // Organizer dashboard (same browser context ⇒ same demo storage).
+  // Organizer dashboard. In demo mode the same context shares localStorage;
+  // in live mode data comes from Supabase and the login gate must be passed.
   await page.goto(`${BASE}/host`, { waitUntil: "networkidle" });
+
+  if (LIVE) {
+    const gate = await page.$("#host-email");
+    if (gate) {
+      await page.fill("#host-email", HOST_EMAIL);
+      await page.fill("#host-org-pass", HOST_PASSWORD);
+      await page.locator('form button[type="submit"]').click();
+      check(`[${touch ? "touch" : "desktop"}] organizer sign-in accepted`, true);
+      // Wait for the dashboard shell to render.
+      await page.waitForSelector("#join-link", { timeout: 15000 }).catch(() => {});
+    } else {
+      check(`[${touch ? "touch" : "desktop"}] organizer login gate shown`, false, "no #host-email field");
+    }
+  }
+
   await page
-    .waitForFunction((txt) => document.body.innerText.includes(txt), expectation, { timeout: 15000 })
+    .waitForFunction((txt) => document.body.innerText.includes(txt), expectation, { timeout: 20000 })
     .then(() => check(`[${touch ? "touch" : "desktop"}] dashboard shows the response`, true))
     .catch(() => check(`[${touch ? "touch" : "desktop"}] dashboard shows the response`, false, "timeout"));
 

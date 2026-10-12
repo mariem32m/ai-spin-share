@@ -18,6 +18,11 @@ create table if not exists public.game_sessions (
   ended_at timestamptz
 );
 
+-- Guarantee at most ONE active session at a time (session creation goes
+-- through the host-actions Edge Function, which relies on this constraint).
+create unique index if not exists game_sessions_single_active_idx
+  on public.game_sessions ((status)) where status = 'active';
+
 -- ---------------------------------------------------------------------
 -- Survey submissions (the questionnaire answers)
 --
