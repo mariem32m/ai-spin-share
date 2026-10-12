@@ -1,7 +1,7 @@
 @import "tailwindcss";
 
 /* =============================================================
-   AI Spin & Share — global styles & theme
+   AI Through Your Eyes — global styles & theme
    ============================================================= */
 
 :root {
@@ -214,37 +214,58 @@ body {
   transform-origin: center;
 }
 
-/* ---------- Wheel ---------- */
-.wheel-rotor {
-  position: absolute;
-  inset: 0;
-  will-change: transform;
+/* ---------- Survey quiz options ---------- */
+.quiz-option {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  width: 100%;
+  text-align: start;
+  padding: 0.9rem 1.1rem;
+  border-radius: 1.25rem;
+  border: 2px solid #e2e8f0;
+  background: #ffffff;
+  cursor: pointer;
+  transition: transform 0.15s ease, border-color 0.2s ease, background 0.2s ease, box-shadow 0.2s ease;
 }
 
-.wheel-svg {
-  display: block;
-  filter: drop-shadow(0 18px 26px rgb(76 29 149 / 0.35));
+.quiz-option:hover:not(:disabled) {
+  transform: translateY(-1px);
+  border-color: #c4b5fd;
 }
 
-.wheel-rotor.is-spinning .wheel-svg {
-  filter: drop-shadow(0 22px 30px rgb(76 29 149 / 0.5));
+.quiz-option:focus-visible {
+  outline: 3px solid #fbbf24;
+  outline-offset: 3px;
 }
 
-.wheel-pointer {
-  position: absolute;
-  top: -16px;
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: 30;
-  filter: drop-shadow(0 6px 10px rgb(76 29 149 / 0.45));
-  animation: glowPulse 1.6s ease-in-out infinite;
+.quiz-option--selected {
+  animation: pop 0.22s cubic-bezier(0.34, 1.56, 0.64, 1) both;
 }
 
-.wheel-deco {
-  animation: wheelDrift 26s linear infinite;
+.quiz-option-check {
+  display: grid;
+  place-items: center;
+  width: 1.6rem;
+  height: 1.6rem;
+  flex-shrink: 0;
+  border-radius: 9999px;
+  border: 2px solid #e2e8f0;
+  background: #fff;
+  color: #fff;
+  font-weight: 900;
+  font-size: 0.95rem;
+  line-height: 1;
+  transition: background 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
 }
 
-/* ---------- Animations ---------- */
+/* ---------- Progress bar ---------- */
+.progress-fill {
+  background: linear-gradient(90deg, #f472b6, #8b5cf6 60%, #38bdf8);
+  box-shadow: 0 0 12px rgb(139 92 246 / 0.55);
+}
+
+/* ---------- Mascot ---------- */
 @keyframes robotIdle {
   0%, 100% { transform: translateY(0) scale(1); }
   50% { transform: translateY(-5px) scale(1.02); }
@@ -301,11 +322,6 @@ body {
   100% { transform: translateY(-115vh) rotate(10deg); opacity: 0; }
 }
 
-@keyframes wheelDrift {
-  0% { transform: rotate(0deg); }
-  100% { transform: rotate(360deg); }
-}
-
 @keyframes wiggle {
   0%, 100% { transform: rotate(-4deg); }
   50% { transform: rotate(4deg); }
@@ -325,7 +341,6 @@ body {
 .animate-pop { animation: pop 0.4s cubic-bezier(0.34, 1.56, 0.64, 1) both; }
 .animate-wiggle { animation: wiggle 0.8s ease-in-out infinite; }
 .animate-twinkle { animation: twinkle 1.8s ease-in-out infinite; }
-.animate-wheel-deco { animation: wheelDrift 26s linear infinite; }
 
 .stagger-1 { animation-delay: 0.08s; }
 .stagger-2 { animation-delay: 0.16s; }
@@ -410,12 +425,15 @@ body {
   .robot,
   .robot--happy,
   .robot--excited,
-  .wheel-pointer,
-  .wheel-deco,
+  .quiz-option,
+  .quiz-option--selected,
   .animate-wiggle,
-  .animate-twinkle,
-  .animate-wheel-deco {
+  .animate-twinkle {
     animation: none !important;
+  }
+
+  .progress-fill {
+    transition: none !important;
   }
 
   .floating-bg span {

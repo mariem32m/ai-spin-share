@@ -12,17 +12,13 @@ export const supabase: SupabaseClient | null = isSupabaseConfigured
   : null;
 
 /** Prefix used for demo-mode localStorage keys. */
-export const DEMO_STORE_KEY = "aispinshare:demo:v1";
+export const DEMO_STORE_KEY = "aiyourseyes:demo:v1";
 
 /** Session id used in demo mode. */
 export const DEMO_SESSION_ID = "demo-session";
 
 /** Host moderation hash from env (SHA-256) or empty when not configured. */
 export const HOST_HASH = (import.meta.env.VITE_HOST_HASH as string | undefined) ?? "";
-
-/** Env-provided official registration URL (fallback for demo sessions). */
-export const ENV_REGISTRATION_URL =
-  (import.meta.env.VITE_REGISTRATION_URL as string | undefined) ?? "";
 
 /** Min ms between submissions from one device. */
 export const MIN_SUBMIT_INTERVAL_MS = Number(
@@ -37,33 +33,101 @@ export function publicBaseUrl(): string {
   return "";
 }
 
+/* ------------------------------------------------------------------
+ * Host authentication
+ *
+ * Privileged dashboard operations run through the `host-actions` Edge
+ * Function. Two ways to authenticate, both stronger than the anon key:
+ *
+ * 1. Legacy host-password hash (`VITE_HOST_HASH`). NOTE: because this
+ *    value is embedded in the public JS bundle, it is not a secret on
+ *    its own — it only gates the dashboard UI.
+ * 2. A real Supabase Auth session (organizer account, email allow-listed
+ *    as `HOST_EMAILS` on the Edge Function). The password never enters
+ *    the bundle. Prefer this in production.
+ * ------------------------------------------------------------------ */
+
+let hostHostUserEmail: string | null = null;
+
+/** Current Supabase Auth access token after organizer sign-in, or null. */
+let hostSessionToken: string | null = null;
+
+/** True after a successful organizer account sign-in. */
+export function isOrganizerSignedIn(): boolean {
+  return Boolean(hostSessionToken);
+}
+
+/** Email of the signed-in organizer (for showing in the dashboard). */
+export function organizerEmail(): string | null {
+  return hostHostUserEmail;
+}
+
+/** Sign in the organizer with a real Supabase Auth account. */
+export async function signInOrganizer(email: string, password: string): Promise<void> {
+  if (!supabase) throw new Error("Supabase is not configured.");
+  const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+  if (error) throw new Error(error.message);
+  hostHostUserEmail = data.user?.email ?? null;
+  hostSessionToken = data.session?.access_token ?? null;
+  if (!hostSessionToken) throw new Error("Sign-in returned no session.");
+}
+
+/** Sign out the organizer and drop the cached token. */
+export async function signOutOrganizer(): Promise<void> {
+  hostHostUserEmail = null;
+  hostSessionToken = null;
+  if (supabase) {
+    try {
+      await supabase.auth.signOut();
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+/**
+ * Bearer token for privileged host actions: the Supabase Auth JWT when an
+ * organizer is signed in, otherwise the configured host hash (fallback).
+ */
+export function hostBearerToken(): string {
+  return hostSessionToken ?? HOST_HASH;
+}
+
 /** Full student join URL. */
 export function studentJoinUrl(): string {
-  return `${publicBaseUrl()}/play`;
+  return `${publicBaseUrl()}/survey`;
+}
+
+/** Survey landing URL (public welcome together with join URL). */
+export function surveyWelcomeUrl(): string {
+  return publicBaseUrl();
 }
 
 /**
  * Call the server-side host action (Supabase Edge Function) for
- * privileged management: moderation, session reset, config, deletion.
- * The SHA-256 host hash is sent as a bearer token — never a password.
- * In demo mode host actions run locally, so this is never called.
+ * privileged management: reading survey responses, moderation, session
+ * reset, config, deletion. The SHA-256 host hash is sent as a bearer
+ * token — never a password. In demo mode host actions run locally, so
+ * this is never called.
  */
 export async function callHostAction(
-  action: "list" | "set_moderation" | "reset_session" | "update_config" | "delete_session",
+  action: "survey_list" | "list" | "set_moderation" | "reset_session" | "update_config" | "delete_session",
   args: Record<string, unknown>,
 ): Promise<{ ok: true } & Record<string, unknown>> {
   if (!isSupabaseConfigured || !url) {
     throw new Error("Host actions require the Supabase Edge Function. See README.");
   }
-  if (!HOST_HASH) {
-    throw new Error("Configure VITE_HOST_HASH to enable host actions.");
+  // A signed-in organizer (Supabase Auth) or the configured host hash.
+  const bearer = hostBearerToken();
+  if (!isOrganizerSignedIn() && !HOST_HASH) {
+    throw new Error("Sign in as an organizer or configure VITE_HOST_HASH to enable host actions.");
   }
   const fnUrl = `${url}/functions/v1/host-actions`;
   const res = await fetch(fnUrl, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${HOST_HASH}`,
+      Authorization: `Bearer ${bearer}`,
     },
     body: JSON.stringify({ action, ...args }),
   });

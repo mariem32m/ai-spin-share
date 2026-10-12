@@ -1,17 +1,31 @@
-/** Shared types for AI Spin & Share. */
+/** Shared types for AI Through Your Eyes — GDGoC AAST Aswan. */
 
-export type ChallengeType = "ai_is" | "my_ai_story" | "if_i_built_ai";
+import type { SurveyQuestionKey } from "./questions";
 
-export type ModerationStatus = "visible" | "hidden";
-
-export interface Submission {
+/** One completed survey submission. */
+export interface SurveySubmission {
   id: string;
   session_id: string;
-  student_name: string;
-  challenge_type: ChallengeType;
-  answer: string;
-  moderation_status: ModerationStatus;
+  /** Optional nickname — never required. */
+  nickname: string | null;
+  question_1_answer: string;
+  question_2_answer: string;
+  /** Multi-select answer stored as an array of option ids. */
+  question_3_answer: string[];
+  question_4_answer: string;
+  question_5_answer: string[];
+  /** Free-text answer to the final question (max 500 chars). */
+  ai_track_expectations: string;
   created_at: string;
+}
+
+/** Input shape when a student submits their survey. */
+export interface NewSurveyInput {
+  session_id: string;
+  nickname: string;
+  /** Question key → selected option id(s). Multi-select questions store arrays. */
+  answers: Record<SurveyQuestionKey, string | string[]>;
+  ai_track_expectations: string;
 }
 
 export interface GameSession {
@@ -23,14 +37,3 @@ export interface GameSession {
   created_at: string;
   ended_at: string | null;
 }
-
-export interface SessionConfigUpdate {
-  allow_repeat_participation?: boolean;
-  registration_url?: string | null;
-}
-
-export const CHALLENGE_TYPES: ChallengeType[] = [
-  "ai_is",
-  "my_ai_story",
-  "if_i_built_ai",
-];

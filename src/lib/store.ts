@@ -1,19 +1,19 @@
-import { supabase, isSupabaseConfigured, DEMO_STORE_KEY, ENV_REGISTRATION_URL, MIN_SUBMIT_INTERVAL_MS, callHostAction } from "./supabase";
-import type { Submission, GameSession, ChallengeType, ModerationStatus, SessionConfigUpdate } from "./types";
-import { CHALLENGE_TYPES } from "./types";
+import {
+  supabase,
+  isSupabaseConfigured,
+  DEMO_STORE_KEY,
+  MIN_SUBMIT_INTERVAL_MS,
+  callHostAction,
+} from "./supabase";
+import type { GameSession, NewSurveyInput, SurveySubmission } from "./types";
+import { SURVEY_QUESTIONS, FINAL_QUESTION } from "./questions";
+import type { SurveyQuestionKey } from "./questions";
 
 export type StoreMode = "supabase" | "demo";
 
-export interface NewSubmissionInput {
-  session_id: string;
-  student_name: string;
-  challenge_type: ChallengeType;
-  answer: string;
-}
-
 export interface RealtimePayload {
   eventType: "INSERT" | "UPDATE" | "DELETE";
-  submission: Submission;
+  submission: SurveySubmission;
 }
 
 export interface SessionInfo {
@@ -26,7 +26,7 @@ export interface SessionInfo {
  * and clearly does NOT synchronize across devices.
  * ================================================================== */
 
-const demoSubsKey = (sessionId: string) => `${DEMO_STORE_KEY}:subs:${sessionId}`;
+const demoSurveysKey = (sessionId: string) => `${DEMO_STORE_KEY}:surveys:${sessionId}`;
 const DEMO_SESSION_KEY = `${DEMO_STORE_KEY}:session`;
 const DEMO_RATE_KEY = `${DEMO_STORE_KEY}:lastSubmit`;
 
@@ -55,10 +55,10 @@ function writeStore(key: string, value: string): void {
 function demoDefaultSession(generation: number): GameSession {
   return {
     id: `demo-session-${generation}`,
-    name: "AI Spin & Share",
+    name: "AI Through Your Eyes",
     status: "active",
     allow_repeat_participation: true,
-    registration_url: ENV_REGISTRATION_URL || null,
+    registration_url: null,
     created_at: new Date().toISOString(),
     ended_at: null,
   };
@@ -79,22 +79,22 @@ function loadDemoSession(): GameSession {
   return session;
 }
 
-function loadDemoSubmissions(sessionId: string): Submission[] {
-  const raw = readStore(demoSubsKey(sessionId), null);
+function loadDemoSurveys(sessionId: string): SurveySubmission[] {
+  const raw = readStore(demoSurveysKey(sessionId), null);
   if (!raw) return [];
   try {
-    const list = JSON.parse(raw) as Submission[];
+    const list = JSON.parse(raw) as SurveySubmission[];
     return Array.isArray(list) ? list : [];
   } catch {
     return [];
   }
 }
 
-function saveDemoSubmissions(sessionId: string, subs: Submission[]): void {
-  writeStore(demoSubsKey(sessionId), JSON.stringify(subs));
+function saveDemoSurveys(sessionId: string, subs: SurveySubmission[]): void {
+  writeStore(demoSurveysKey(sessionId), JSON.stringify(subs));
 }
 
-/** Tiny emitter so the same tab hears demo-mode "realtime" changes. */
+/** Tiny emitter so listeners hear demo-mode "realtime" changes. */
 const demoListeners = new Set<(p: RealtimePayload) => void>();
 
 function emitDemo(payload: RealtimePayload): void {
@@ -107,16 +107,16 @@ function emitDemo(payload: RealtimePayload): void {
   });
 }
 
-// Cross-tab demo sync: when another tab writes submissions, refetch
-// and broadcast the full list to every subscriber.
+// Cross-tab demo sync: when another tab writes surveys, refetch and
+// broadcast the full list to every subscriber.
 if (typeof window !== "undefined") {
   window.addEventListener("storage", (e) => {
     if (!e.key || !e.key.startsWith(DEMO_STORE_KEY)) return;
     const session = loadDemoSession();
-    const subs = loadDemoSubmissions(session.id);
+    const surveys = loadDemoSurveys(session.id);
     refetchHints.forEach((fn) => {
       try {
-        fn(subs);
+        fn(surveys);
       } catch {
         /* ignore */
       }
@@ -125,7 +125,7 @@ if (typeof window !== "undefined") {
 }
 
 /** Secondary listeners that receive a full list refetch signal. */
-const refetchHints = new Set<(subs: Submission[]) => void>();
+const refetchHints = new Set<(subs: SurveySubmission[]) => void>();
 
 /* ==================================================================
  * Rate limiting (same device). Real server-side protection should be
@@ -148,20 +148,16 @@ export interface Store {
   mode: StoreMode;
   /** Resolve the active session (creating one if needed). */
   ensureSession(): Promise<SessionInfo>;
-  getSubmissions(sessionId: string): Promise<Submission[]>;
-  /** Host-only full list (includes hidden items) via the Edge Function. */
-  hostList(sessionId: string): Promise<Submission[]>;
-  submit(input: NewSubmissionInput): Promise<Submission>;
-  setModeration(id: string, status: ModerationStatus): Promise<void>;
-  updateConfig(config: SessionConfigUpdate): Promise<GameSession>;
+  /** Create one survey submission. Public students may call this. */
+  submitSurvey(input: NewSurveyInput): Promise<SurveySubmission>;
+  /** Host-only full response list, via the protected Edge Function in live mode. */
+  listSurveys(sessionId: string): Promise<SurveySubmission[]>;
   resetSession(): Promise<GameSession>;
   deleteSessionData(sessionId: string): Promise<void>;
-  subscribe(sessionId: string, onPayload: (p: RealtimePayload) => void, onList?: (subs: Submission[]) => void): () => void;
+  subscribe(sessionId: string, onPayload: (p: RealtimePayload) => void, onList?: (subs: SurveySubmission[]) => void): () => void;
 }
 
-export const store: Store = isSupabaseConfigured
-  ? supabaseStore()
-  : demoStore();
+export const store: Store = isSupabaseConfigured ? supabaseStore() : demoStore();
 
 /* ---------------- Cached session resolution ----------------
  * Single source of truth for the active session; reused by every page
@@ -175,7 +171,7 @@ export function resolveSession(): Promise<SessionInfo> {
   return sessionPromise;
 }
 
-/** Invalidate the cached session (after reset / config changes). */
+/** Invalidate the cached session (after reset). */
 export function invalidateSession(): void {
   sessionPromise = null;
 }
@@ -206,10 +202,9 @@ function supabaseStore(): Store {
     const { data: created, error: insertError } = await db
       .from("game_sessions")
       .insert({
-        name: "AI Spin & Share",
+        name: "AI Through Your Eyes",
         status: "active",
         allow_repeat_participation: true,
-        registration_url: ENV_REGISTRATION_URL || null,
       })
       .select("*")
       .single();
@@ -218,52 +213,31 @@ function supabaseStore(): Store {
     return { mode: "supabase", session: created as GameSession };
   }
 
-  async function getSubmissions(sessionId: string): Promise<Submission[]> {
-    const { data, error } = await db
-      .from("submissions")
-      .select("*")
-      .eq("session_id", sessionId)
-      .order("created_at", { ascending: false });
-    if (error) throw new Error(error.message);
-    return (data ?? []) as Submission[];
-  }
-
-  async function hostList(sessionId: string): Promise<Submission[]> {
-    const res = await callHostAction("list", { session_id: sessionId });
-    return (res.submissions as Submission[]) ?? [];
-  }
-
-  async function submit(input: NewSubmissionInput): Promise<Submission> {
+  async function submitSurvey(input: NewSurveyInput): Promise<SurveySubmission> {
     if (!checkSubmitRateLimit()) {
       throw new Error("RATE_LIMITED");
     }
     const { data, error } = await db
-      .from("submissions")
+      .from("survey_submissions")
       .insert({
         session_id: input.session_id,
-        student_name: input.student_name,
-        challenge_type: input.challenge_type,
-        answer: input.answer,
-        moderation_status: "visible",
+        nickname: input.nickname.trim() || null,
+        question_1_answer: input.answers.question_1_answer,
+        question_2_answer: input.answers.question_2_answer,
+        question_3_answer: input.answers.question_3_answer,
+        question_4_answer: input.answers.question_4_answer,
+        question_5_answer: input.answers.question_5_answer,
+        ai_track_expectations: input.ai_track_expectations.trim(),
       })
       .select("*")
       .single();
     if (error) throw new Error(error.message);
-    return data as Submission;
+    return data as SurveySubmission;
   }
 
-  async function setModeration(id: string, status: ModerationStatus): Promise<void> {
-    // Moderation is privileged: run it through the host Edge Function
-    // (verify_token = host hash). Public users cannot update rows.
-    await callHostAction("set_moderation", { id, status });
-  }
-
-  async function updateConfig(config: SessionConfigUpdate): Promise<GameSession> {
-    const { mode, session } = await ensureSession();
-    void mode;
-    const res = await callHostAction("update_config", { session_id: session.id, ...config });
-    invalidateSession();
-    return res.session as GameSession;
+  async function listSurveys(sessionId: string): Promise<SurveySubmission[]> {
+    const res = await callHostAction("survey_list", { session_id: sessionId });
+    return (res.surveys as SurveySubmission[]) ?? [];
   }
 
   async function resetSession(): Promise<GameSession> {
@@ -280,32 +254,20 @@ function supabaseStore(): Store {
   }
 
   function subscribe(sessionId: string, onPayload: (p: RealtimePayload) => void): () => void {
-    const channel = db
-      .channel(`subs:${sessionId}`)
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "submissions", filter: `session_id=eq.${sessionId}` },
-        (payload) => {
-          const rec = (payload.new ?? payload.old) as Submission | undefined;
-          if (!rec) return;
-          const eventType = (payload.eventType ?? "UPDATE").toUpperCase() as RealtimePayload["eventType"];
-          onPayload({ eventType, submission: rec });
-        },
-      )
-      .subscribe();
-    return () => {
-      db.removeChannel(channel);
-    };
+    // NOTE: survey submissions are private (no public SELECT policy), so the
+    // dashboard reads them through the protected Edge Function and polls for
+    // updates. This subscription is a no-op that keeps the Store surface
+    // uniform; demo mode uses its own event bus below.
+    void sessionId;
+    void onPayload;
+    return () => undefined;
   }
 
   return {
     mode: "supabase",
     ensureSession,
-    getSubmissions,
-    hostList,
-    submit,
-    setModeration,
-    updateConfig,
+    submitSurvey,
+    listSurveys,
     resetSession,
     deleteSessionData,
     subscribe,
@@ -323,62 +285,35 @@ function demoStore(): Store {
     writeStore(DEMO_SESSION_KEY, JSON.stringify(session));
   }
 
-  async function getSubmissions(sessionId: string): Promise<Submission[]> {
-    return loadDemoSubmissions(sessionId)
-      .slice()
-      .sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
-  }
-
-  async function hostList(sessionId: string): Promise<Submission[]> {
-    return loadDemoSubmissions(sessionId)
-      .slice()
-      .sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
-  }
-
-  async function submit(input: NewSubmissionInput): Promise<Submission> {
+  async function submitSurvey(input: NewSurveyInput): Promise<SurveySubmission> {
     if (!checkSubmitRateLimit()) {
       throw new Error("RATE_LIMITED");
     }
-    const sub: Submission = {
+    const sub: SurveySubmission = {
       id: randomId(),
       session_id: input.session_id,
-      student_name: input.student_name.trim(),
-      challenge_type: input.challenge_type,
-      answer: input.answer.trim(),
-      moderation_status: "visible",
+      nickname: input.nickname.trim() || null,
+      question_1_answer: input.answers.question_1_answer as string,
+      question_2_answer: input.answers.question_2_answer as string,
+      question_3_answer: [...(input.answers.question_3_answer as string[])],
+      question_4_answer: input.answers.question_4_answer as string,
+      question_5_answer: [...(input.answers.question_5_answer as string[])],
+      ai_track_expectations: input.ai_track_expectations.trim(),
       created_at: new Date().toISOString(),
     };
-    const subs = loadDemoSubmissions(input.session_id);
-    subs.push(sub);
-    saveDemoSubmissions(input.session_id, subs);
+    const all = loadDemoSurveys(input.session_id);
+    all.push(sub);
+    saveDemoSurveys(input.session_id, all);
     emitDemo({ eventType: "INSERT", submission: sub });
     return sub;
   }
 
-  async function setModeration(id: string, status: ModerationStatus): Promise<void> {
-    const session = loadDemoSession();
-    const subs = loadDemoSubmissions(session.id).map((s) => (s.id === id ? { ...s, moderation_status: status } : s));
-    saveDemoSubmissions(session.id, subs);
-    const updated = subs.find((s) => s.id === id);
-    if (updated) {
-      refetchHints.forEach((fn) => fn(subs));
-    }
-  }
-
-  async function updateConfig(config: SessionConfigUpdate): Promise<GameSession> {
-    const session = loadDemoSession();
-    const next: GameSession = { ...session };
-    if (typeof config.allow_repeat_participation === "boolean") next.allow_repeat_participation = config.allow_repeat_participation;
-    if (config.registration_url !== undefined) next.registration_url = config.registration_url;
-    persistSession(next);
-    invalidateSession();
-    return next;
+  async function listSurveys(sessionId: string): Promise<SurveySubmission[]> {
+    return loadDemoSurveys(sessionId).slice().sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
   }
 
   async function resetSession(): Promise<GameSession> {
     const old = loadDemoSession();
-    // Archive old submissions under an "archived" marker untouched
-    // (localStorage history), then open a fresh session.
     const next: GameSession = {
       ...old,
       id: `demo-session-${Date.now()}`,
@@ -394,19 +329,19 @@ function demoStore(): Store {
 
   async function deleteSessionData(sessionId: string): Promise<void> {
     try {
-      localStorage.removeItem(demoSubsKey(sessionId));
+      localStorage.removeItem(demoSurveysKey(sessionId));
     } catch {
       /* ignore */
     }
     refetchHints.forEach((fn) => fn([]));
   }
 
-  function subscribe(sessionId: string, onPayload: (p: RealtimePayload) => void, onList?: (subs: Submission[]) => void): () => void {
+  function subscribe(sessionId: string, onPayload: (p: RealtimePayload) => void, onList?: (subs: SurveySubmission[]) => void): () => void {
     const payloadListener = (p: RealtimePayload) => {
       if (!p.submission || p.submission.session_id !== sessionId) return;
       onPayload(p);
     };
-    const listListener = (subs: Submission[]) => {
+    const listListener = (subs: SurveySubmission[]) => {
       if (onList) onList(subs);
     };
     demoListeners.add(payloadListener);
@@ -420,11 +355,8 @@ function demoStore(): Store {
   return {
     mode: "demo",
     ensureSession,
-    getSubmissions,
-    hostList,
-    submit,
-    setModeration,
-    updateConfig,
+    submitSurvey,
+    listSurveys,
     resetSession,
     deleteSessionData,
     subscribe,
@@ -432,23 +364,45 @@ function demoStore(): Store {
 }
 
 /* ==================================================================
- * Validation helpers (shared by form + submission)
+ * Validation (shared by the form and any submission path)
  * ================================================================== */
 
-export function validateSubmission(input: {
-  student_name: string;
-  answer: string;
-  challenge_type: string;
-}): { ok: boolean; error?: "name_empty" | "name_long" | "answer_empty" | "answer_long" | "bad_challenge" } {
-  const name = input.student_name.trim();
-  const answer = input.answer.trim();
-  if (!name) return { ok: false, error: "name_empty" };
-  if (name.length > 50) return { ok: false, error: "name_long" };
-  if (!answer) return { ok: false, error: "answer_empty" };
-  if (answer.length > 500) return { ok: false, error: "answer_long" };
-  if (!CHALLENGE_TYPES.includes(input.challenge_type as ChallengeType)) {
-    return { ok: false, error: "bad_challenge" };
+export type SurveyValidationError =
+  | "missing_answer"
+  | "bad_answer"
+  | "expectations_empty"
+  | "expectations_long"
+  | "nickname_long";
+
+const optionIds = (key: SurveyQuestionKey) => SURVEY_QUESTIONS.find((q) => q.key === key)?.options.map((o) => o.id) ?? [];
+
+export function validateSurveySubmission(input: {
+  answers: Record<SurveyQuestionKey, string | string[]>;
+  ai_track_expectations: string;
+  nickname: string;
+}): { ok: true } | { ok: false; error: SurveyValidationError; questionKey?: SurveyQuestionKey; extra?: string } {
+  const nickname = input.nickname.trim();
+  if (nickname.length > 50) return { ok: false, error: "nickname_long" };
+
+  for (const q of SURVEY_QUESTIONS) {
+    const value = input.answers[q.key];
+    const validIds = optionIds(q.key);
+    if (q.multiSelect) {
+      const arr = Array.isArray(value) ? value : [];
+      if (arr.length === 0) return { ok: false, error: "missing_answer", questionKey: q.key };
+      if (arr.some((id) => !validIds.includes(id))) return { ok: false, error: "bad_answer", questionKey: q.key };
+    } else {
+      const v = typeof value === "string" ? value : "";
+      if (!v) return { ok: false, error: "missing_answer", questionKey: q.key };
+      if (!validIds.includes(v)) return { ok: false, error: "bad_answer", questionKey: q.key };
+    }
   }
+
+  const text = input.ai_track_expectations.trim();
+  if (!text) return { ok: false, error: "expectations_empty" };
+  const max = FINAL_QUESTION.maxLength;
+  if (text.length > max) return { ok: false, error: "expectations_long", extra: String(max) };
+
   return { ok: true };
 }
 

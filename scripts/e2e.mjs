@@ -1,13 +1,14 @@
 /**
- * End-to-end tests for AI Spin & Share, driving the real system Chromium
- * (Chrome or Edge) via playwright-core — no browser download needed.
+ * End-to-end tests for AI Through Your Eyes, driving the real system
+ * Chromium (Chrome or Edge) via playwright-core — no browser download.
  *
  *   npm run test:e2e                 # against http://localhost:4173
  *   BASE_URL=... npm run test:e2e    # against any deployment
  *
- * Covers: the spin button is reliably clickable (regression guard for the
- * moving-button bug), the wheel actually rotates, and the full student
- * journey works on both desktop and touch: spin -> answer -> submit -> wall.
+ * Covers the full student journey on both desktop and touch: answer the
+ * five questions, type the final expectation, submit, see the thank-you
+ * screen, then verify the organizer dashboard shows the response and the
+ * QR panel points at the real /survey link.
  */
 import { existsSync } from "node:fs";
 import { chromium } from "playwright-core";
@@ -51,7 +52,7 @@ const watch = (page) => {
   page.on("pageerror", (e) => errors.push(`pageerror: ${e.message}`));
 };
 
-/** Full student journey in a fresh context; returns the answer text. */
+/** Full student journey in a fresh context; returns the expectation text. */
 async function journey({ touch }) {
   const ctx = await browser.newContext({
     hasTouch: !!touch,
@@ -61,43 +62,67 @@ async function journey({ touch }) {
   const page = await ctx.newPage();
   watch(page);
 
-  await page.goto(`${BASE}/play`, { waitUntil: "networkidle" });
-  await page.waitForSelector(".btn-spin");
-  const answer = `E2E ${touch ? "touch" : "desktop"} ${Date.now()}`;
+  await page.goto(`${BASE}/survey`, { waitUntil: "networkidle" });
+  await page.waitForSelector(".quiz-option", { timeout: 15000 });
+  check(`[${touch ? "touch" : "desktop"}] survey loads with question`, true);
 
-  // The spin button must be clickable by Playwright's strict actionability
-  // (visible, enabled, STABLE) — this is the regression guard.
-  try {
-    await page.waitForSelector(".btn-spin", { state: "visible" });
-    await page.locator(".btn-spin").click({ timeout: 8000 });
-  } catch (e) {
-    check(`[${touch ? "touch" : "desktop"}] spin button clickable`, false, String(e.message).split("\n")[0]);
-    await ctx.close();
-    return answer;
+  const expectation = `E2E ${touch ? "touch" : "desktop"} ${Date.now()} — want to build an AI agent`;
+
+  // Ask all five questions.
+  for (let i = 0; i < 5; i++) {
+    const count = await page.locator(".quiz-option").count();
+    if (count === 0) {
+      check(`[${touch ? "touch" : "desktop"}] question ${i + 1} shows options`, false);
+      break;
+    }
+    await page.locator(".quiz-option").nth(0).click();
+    // Multi-select questions have 5+ options (q3, q5): pick a second one too.
+    if (count >= 5) {
+      await page.locator(".quiz-option").nth(1).click();
+    }
+    await page.locator('[data-testid="next"]').click();
+    if (i < 4) {
+      await page.waitForSelector(".quiz-option", { timeout: 8000 });
+    }
   }
+  check(`[${touch ? "touch" : "desktop"}] all 5 questions answered`, true);
 
-  const transform = await page.$eval(".wheel-rotor", (el) => el.style.transform);
-  check(`[${touch ? "touch" : "desktop"}] wheel rotates after click`, /rotate\(([1-9]\d{2,})/.test(transform), transform);
+  // Final open question.
+  await page.waitForSelector("#survey-expectations", { timeout: 8000 });
+  check(`[${touch ? "touch" : "desktop"}] final question reached`, true);
+  await page.fill("#survey-nickname", touch ? "Layla" : "Omar");
+  await page.fill("#survey-expectations", expectation);
 
-  await page.waitForSelector("div.fixed.inset-0 h2", { timeout: 12000 });
-  await page.locator("div.fixed.inset-0 button").first().click();
-  await page.waitForSelector("#student-name", { timeout: 5000 });
+  const counter = await page.locator("text=/\\d+\\/500/").count();
+  check(`[${touch ? "touch" : "desktop"}] character counter visible`, counter > 0);
 
-  await page.fill("#student-name", "Layla E2E");
-  await page.fill("#student-answer", answer);
-  await page.locator('form button[type="submit"]').click();
-  await page.waitForSelector('a[href="/wall"]', { timeout: 8000 });
-  check(`[${touch ? "touch" : "desktop"}] submit reaches success`, true);
+  await page.locator('[data-testid="submit"]').click();
+  await page
+    .waitForFunction(
+      (txt) => document.body.innerText.includes("Thank You") || document.body.innerText.includes(txt),
+      expectation,
+      { timeout: 10000 },
+    )
+    .then(() => check(`[${touch ? "touch" : "desktop"}] thank-you screen shown`, true))
+    .catch(() => check(`[${touch ? "touch" : "desktop"}] thank-you screen shown`, false, "timeout"));
 
-  await page.goto(`${BASE}/wall`, { waitUntil: "networkidle" });
-  const seen = await page
-    .waitForFunction((txt) => document.body.innerText.includes(txt), answer, { timeout: 8000 })
-    .then(() => true)
-    .catch(() => false);
-  check(`[${touch ? "touch" : "desktop"}] wall shows the answer`, seen);
+  // Organizer dashboard (same browser context ⇒ same demo storage).
+  await page.goto(`${BASE}/host`, { waitUntil: "networkidle" });
+  await page
+    .waitForFunction((txt) => document.body.innerText.includes(txt), expectation, { timeout: 15000 })
+    .then(() => check(`[${touch ? "touch" : "desktop"}] dashboard shows the response`, true))
+    .catch(() => check(`[${touch ? "touch" : "desktop"}] dashboard shows the response`, false, "timeout"));
+
+  // QR panel points at the real survey URL.
+  const joinLink = await page.inputValue("#join-link").catch(() => "");
+  check(
+    `[${touch ? "touch" : "desktop"}] join link points to /survey`,
+    Boolean(joinLink) && joinLink.endsWith("/survey"),
+    joinLink,
+  );
 
   await ctx.close();
-  return answer;
+  return expectation;
 }
 
 try {

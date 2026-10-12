@@ -1,13 +1,25 @@
 // =====================================================================
-// AI Spin & Share — host-actions Edge Function
+// AI Through Your Eyes — host-actions Edge Function
 //
-// Protects every privileged action with a host bearer token (the SHA-256
-// hash configured as VITE_HOST_HASH in the frontend + HOST_HASH here) and
-// runs with the service-role key, so students can never call it.
+// Protects every privileged action with host authentication and runs
+// with the service-role key, so students can never call it directly.
+//
+// Two host authentication modes (either authorizes):
+//
+//   1. Legacy host bearer hash — the SHA-256 hex configured in the
+//      frontend as VITE_HOST_HASH and here as the HOST_HASH secret.
+//   2. Supabase Auth organizer account — the client presents a real
+//      user JWT; the user's email must be in the HOST_EMAILS allow-list
+//      (comma-separated). This is the recommended production mode: the
+//      organizer's password never leaves the browser session.
+//
+// Reading survey responses is privileged: the public anon key has NO SELECT
+// policy on survey_submissions, so the dashboard fetches the list here.
 //
 // Deploy:
 //   supabase functions deploy host-actions --no-verify-jwt
-//   supabase secrets set HOST_HASH=<the same SHA-256 hex as VITE_HOST_HASH>
+//   supabase secrets set HOST_HASH=<hex>   (optional, legacy mode)
+//   supabase secrets set HOST_EMAILS=name@example.com (optional, account mode)
 //
 // =====================================================================
 import { createClient } from "npm:@supabase/supabase-js@2";
@@ -15,12 +27,43 @@ import { createClient } from "npm:@supabase/supabase-js@2";
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
 const SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
 const HOST_HASH = Deno.env.get("HOST_HASH") ?? "";
+const HOST_EMAILS = Deno.env.get("HOST_EMAILS") ?? "";
 
 const ALLOWED_STATUS = ["visible", "hidden"];
 
 async function sha256Hex(text: string): Promise<string> {
   const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
   return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function hostEmails(): string[] {
+  return HOST_EMAILS.split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+/**
+ * Return true when the presented bearer token is authorized to manage
+ * host data. Checks the legacy host hash, then a Supabase Auth JWT whose
+ * user email is allow-listed via HOST_EMAILS.
+ */
+async function isAuthorized(token: string): Promise<boolean> {
+  if (!token) return false;
+
+  // 1) Legacy host-password hash.
+  if (HOST_HASH && (await sha256Hex(token)) === HOST_HASH) return true;
+
+  // 2) Supabase Auth organizer account (safe default: disabled until
+  //    HOST_EMAILS is configured).
+  const allowed = hostEmails();
+  if (allowed.length === 0) return false;
+
+  const auth = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  const { data, error } = await auth.auth.getUser(token);
+  if (error || !data.user || !data.user.email) return false;
+  return allowed.includes(data.user.email.toLowerCase());
 }
 
 function json(body: unknown, status = 200): Response {
@@ -35,8 +78,7 @@ Deno.serve(async (req: Request) => {
 
   // ---- Host authentication -------------------------------------------------
   const token = (req.headers.get("authorization") ?? "").replace(/^Bearer\s+/i, "");
-  const tokenHash = await sha256Hex(token);
-  if (!HOST_HASH || tokenHash !== HOST_HASH) {
+  if (!(await isAuthorized(token))) {
     return json({ ok: false, message: "Unauthorized" }, 401);
   }
 
@@ -55,6 +97,20 @@ Deno.serve(async (req: Request) => {
 
   try {
     switch (action) {
+      // Full private survey response list for the organizer dashboard.
+      // Public users can never reach this action (host bearer required) nor
+      // read the table directly (no SELECT policy).
+      case "survey_list": {
+        const sessionId = String(body.session_id ?? "");
+        const { data, error } = await db
+          .from("survey_submissions")
+          .select("*")
+          .eq("session_id", sessionId)
+          .order("created_at", { ascending: false });
+        if (error) throw error;
+        return json({ ok: true, surveys: data });
+      }
+
       // Full moderation list (includes hidden items for the host UI).
       case "list": {
         const sessionId = String(body.session_id ?? "");
@@ -102,7 +158,7 @@ Deno.serve(async (req: Request) => {
           .eq("id", sessionId);
         const { data, error } = await db
           .from("game_sessions")
-          .insert({ name: "AI Spin & Share", status: "active", allow_repeat_participation: true })
+          .insert({ name: "AI Through Your Eyes", status: "active", allow_repeat_participation: true })
           .select()
           .single();
         if (error) throw error;
@@ -112,6 +168,7 @@ Deno.serve(async (req: Request) => {
       // Permanent deletion — the host explicitly confirms in the UI.
       case "delete_session": {
         const sessionId = String(body.session_id ?? "");
+        await db.from("survey_submissions").delete().eq("session_id", sessionId);
         await db.from("submissions").delete().eq("session_id", sessionId);
         await db.from("game_sessions").delete().eq("id", sessionId);
         return json({ ok: true });

@@ -7,6 +7,14 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
+# Environment files (never commit real secrets)
+.env
+.env.*
+!.env.example
+
+# Scratch copy of the project (not part of the app)
+new-project/
+
 node_modules
 dist
 dist-ssr

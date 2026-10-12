@@ -7,19 +7,6 @@ function prefersReducedMotion(): boolean {
   );
 }
 
-/** Small, quick burst used when the wheel stops. */
-export function wheelConfetti(): void {
-  if (prefersReducedMotion()) return;
-  confetti({
-    particleCount: 60,
-    spread: 70,
-    origin: { y: 0.6 },
-    colors: ["#facc15", "#2dd4bf", "#c4b5fd", "#f9a8d4", "#38bdf8"],
-    scalar: 0.9,
-    ticks: 120,
-  });
-}
-
 /** Big celebration used after a successful submission. */
 export function celebrateConfetti(): void {
   if (prefersReducedMotion()) return;

@@ -8,7 +8,6 @@
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "preview": "vite preview",
-    "test:wheel": "node scripts/test-wheel.mjs",
     "test:store": "vite-node scripts/test-store.ts",
     "test:e2e": "node scripts/e2e.mjs"
   },

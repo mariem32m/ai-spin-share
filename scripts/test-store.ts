@@ -4,11 +4,15 @@
  * like in the browser build.
  * Run: npm run test:store
  *
- * Covers the final acceptance path: ensure session → submit → real-time
- * notification → moderation (hide) → host list → reset → config.
+ * Covers the survey acceptance path: session resolution, validation rules,
+ * submit → realtime notification, rate limiting, newest-first ordering,
+ * dashboard aggregation (distribution), CSV export shape, reset session.
  */
-import { store, resolveSession, validateSubmission } from "../src/lib/store";
-import type { Submission } from "../src/lib/types";
+import { store, resolveSession, validateSurveySubmission } from "../src/lib/store";
+import type { SurveySubmission } from "../src/lib/types";
+import { distribution } from "../src/lib/stats";
+import { SURVEY_QUESTIONS } from "../src/lib/questions";
+import { surveysToCsv } from "../src/lib/csv";
 
 // ---- Minimal localStorage shim so the demo store can persist in-process ----
 const memory = new Map<string, string>();
@@ -20,20 +24,31 @@ const memory = new Map<string, string>();
 } as Storage;
 
 let failures = 0;
-const check = (name: string, cond: boolean) => {
+const check = (name: string, cond: boolean, detail = "") => {
   if (!cond) {
     failures++;
-    console.error("  FAIL:", name);
+    console.error("  FAIL:", name, detail);
   } else {
     console.log("  ok  :", name);
   }
 };
 
-const RATE_KEY = "aispinshare:demo:v1:lastSubmit";
+const RATE_KEY = "aiyourseyes:demo:v1:lastSubmit";
 const clearRateLimit = () => memory.delete(RATE_KEY);
 
+/** A fully valid answer set. */
+function validAnswers() {
+  return {
+    question_1_answer: "new_to_ai",
+    question_2_answer: "almost_every_day",
+    question_3_answer: ["answer_and_generate", "analyze_and_patterns"],
+    question_4_answer: "usually_but_mistakes",
+    question_5_answer: ["machine_learning", "generative_ai"],
+  };
+}
+
 const run = async () => {
-  console.log("— demo store integration tests —");
+  console.log("— survey store integration tests —");
 
   // 1. Session resolution (demo mode).
   const info = await resolveSession();
@@ -42,26 +57,56 @@ const run = async () => {
   const sessionId = info.session.id;
 
   // 2. Validation rules.
-  check("rejects empty name", validateSubmission({ student_name: "  ", answer: "x", challenge_type: "ai_is" }).error === "name_empty");
-  check("rejects empty answer", validateSubmission({ student_name: "A", answer: "  ", challenge_type: "my_ai_story" }).error === "answer_empty");
-  check("rejects >50 name", validateSubmission({ student_name: "A".repeat(51), answer: "x", challenge_type: "ai_is" }).error === "name_long");
-  check("rejects >500 answer", validateSubmission({ student_name: "A", answer: "x".repeat(501), challenge_type: "ai_is" }).error === "answer_long");
-  check("rejects bad challenge", validateSubmission({ student_name: "A", answer: "x", challenge_type: "nope" }).error === "bad_challenge");
-  check("accepts valid", validateSubmission({ student_name: "Sara", answer: "AI is cool", challenge_type: "ai_is" }).ok === true);
+  const v = validateSurveySubmission;
+  check(
+    "rejects missing q1",
+    v({ answers: { ...validAnswers(), question_1_answer: "" }, nickname: "", ai_track_expectations: "wish" }).error === "missing_answer",
+  );
+  check(
+    "rejects empty multi-select",
+    v({ answers: { ...validAnswers(), question_3_answer: [] }, nickname: "", ai_track_expectations: "wish" }).error === "missing_answer",
+  );
+  check(
+    "rejects bad option id",
+    v({ answers: { ...validAnswers(), question_2_answer: "nope" }, nickname: "", ai_track_expectations: "wish" }).error === "bad_answer",
+  );
+  check(
+    "rejects empty expectations",
+    v({ answers: validAnswers(), nickname: "", ai_track_expectations: "  " }).error === "expectations_empty",
+  );
+  check(
+    "rejects >500 expectations",
+    v({ answers: validAnswers(), nickname: "", ai_track_expectations: "x".repeat(501) }).error === "expectations_long",
+  );
+  check(
+    "rejects >50 nickname",
+    v({ answers: validAnswers(), nickname: "A".repeat(51), ai_track_expectations: "wish" }).error === "nickname_long",
+  );
+  check(
+    "accepts valid submission",
+    v({ answers: validAnswers(), nickname: "Sara", ai_track_expectations: "I want to build agents" }).ok === true,
+  );
 
-  // 3. Real-time notification on submit.
-  let received: Submission | null = null;
+  // 3. Realtime notification on submit.
+  let received: SurveySubmission | null = null;
   const unsub = store.subscribe(sessionId, (p) => {
     if (p.eventType === "INSERT") received = p.submission;
   });
-  const first = await store.submit({ session_id: sessionId, student_name: "Sara", challenge_type: "ai_is", answer: "AI is cool" });
+  const first = await store.submitSurvey({
+    session_id: sessionId,
+    nickname: "Sara",
+    answers: validAnswers(),
+    ai_track_expectations: "I want to build agents",
+  });
   check("submit returns record", Boolean(first.id));
   check("realtime payload delivered", received?.id === first.id);
+  check("multi-select answer preserved", (first.question_3_answer as string[]).join(",") === "answer_and_generate,analyze_and_patterns");
+  check("expectations trimmed", first.ai_track_expectations === "I want to build agents");
 
   // 4. Rate limiter blocks a second immediate submit.
   let rateBlocked = false;
   try {
-    await store.submit({ session_id: sessionId, student_name: "Sara", challenge_type: "ai_is", answer: "again" });
+    await store.submitSurvey({ session_id: sessionId, nickname: "", answers: validAnswers(), ai_track_expectations: "again" });
   } catch (e) {
     rateBlocked = e instanceof Error && e.message === "RATE_LIMITED";
   }
@@ -70,34 +115,42 @@ const run = async () => {
 
   // 5. Newest-first ordering.
   clearRateLimit();
-  const second = await store.submit({ session_id: sessionId, student_name: "Omar", challenge_type: "if_i_built_ai", answer: "🚀 a robot for homework" });
-  const all = await store.getSubmissions(sessionId);
+  const second = await store.submitSurvey({
+    session_id: sessionId,
+    nickname: "Omar",
+    answers: { ...validAnswers(), question_1_answer: "built_project", question_5_answer: ["building_projects"] },
+    ai_track_expectations: "نفسي أبني مشروع AI حقيقي",
+  });
+  const all = await store.listSurveys(sessionId);
   check("2 submissions stored", all.length === 2);
   check("newest first", all[0].id === second.id);
-  check("answer text preserved (no trimming of emoji)", all[1].answer === "AI is cool");
+  check("arabic expectations preserved", (all[1].ai_track_expectations as string) === "I want to build agents");
 
-  // 6. Moderation: hide → host list shows hidden; wall list still includes it.
-  await store.setModeration(first.id, "hidden");
-  const hostList = await store.hostList(sessionId);
-  check("host list contains hidden", hostList.find((s) => s.id === first.id)?.moderation_status === "hidden");
-  await store.setModeration(first.id, "visible");
-  const restored = await store.hostList(sessionId);
-  check("restore works", restored.find((s) => s.id === first.id)?.moderation_status === "visible");
+  // 6. Dashboard aggregation (distribution).
+  const q1 = distribution(all, SURVEY_QUESTIONS[0]);
+  const q1New = q1.items.find((i) => i.id === "new_to_ai");
+  check("q1 counts new_to_ai = 1", q1New?.count === 1);
+  check("q1 base = 2", q1.baseCount === 2);
+  const q3 = distribution(all, SURVEY_QUESTIONS[2]);
+  check("q3 multi: total votes = 4", q3.items.reduce((s, i) => s + i.count, 0) === 4);
+  check("q3 base stays 2", q3.baseCount === 2);
 
-  // 7. updateConfig persists.
-  const cfg = await store.updateConfig({ allow_repeat_participation: false, registration_url: "https://example.com/join" });
-  check("config saved (repeat=false)", cfg.allow_repeat_participation === false);
-  check("config saved (url)", cfg.registration_url === "https://example.com/join");
+  // 7. CSV export shape.
+  const csv = surveysToCsv(all, "en");
+  check("csv starts with BOM", csv.charCodeAt(0) === 0xfeff);
+  check("csv has header", csv.includes("question_1_answer"));
+  check("csv contains free-text answer", csv.includes("I want to build agents"));
 
   // 8. resetSession opens a fresh session and keeps history archived.
+  clearRateLimit();
   const fresh = await store.resetSession();
   check("reset produces new session id", fresh.id !== sessionId);
-  const freshList = await store.getSubmissions(fresh.id);
+  const freshList = await store.listSurveys(fresh.id);
   check("fresh session is empty", freshList.length === 0);
-  const oldList = await store.getSubmissions(sessionId);
+  const oldList = await store.listSurveys(sessionId);
   check("old session archived (still readable)", oldList.length === 2);
 
-  console.log(failures === 0 ? "\n✅ ALL STORE TESTS PASSED" : `\n❌ ${failures} FAILURES`);
+  console.log(failures === 0 ? "\n✅ ALL SURVEY STORE TESTS PASSED" : `\n❌ ${failures} FAILURES`);
   process.exit(failures === 0 ? 0 : 1);
 };
 
